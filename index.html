@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#007bff">
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .then(reg => console.log('SW registered:', reg.scope))
+      .catch(err => console.error('SW failed:', err));
+  });
+}
+</script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Layered Canvas Editor (3 Layers)</title>
+  <style>
+    body { margin:0; font-family:sans-serif; display:flex; flex-direction:column; height:100vh; }
+    #toolbar { background:#f0f0f0; padding:8px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    #canvas-container { flex:1; position:relative; background:#333; overflow:hidden; }
+    canvas.layer { position:absolute; top:0; left:0; }
+    .control-group { display:flex; align-items:center; gap:4px; }
+    label { font-size:0.9em; }
+    input[type=range], select { width:100px; }
+    button.tool-btn { padding:6px 12px; border:none; background:#e0e0e0; cursor:pointer; }
+    button.tool-btn.active { background:#007bff; color:white; }
+    #rotation-value { width:40px; text-align:center; font-size:0.9em; }
+    #brush-preview { width:40px; height:40px; border:1px solid #ccc; border-radius:50%; margin-left:4px; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <div class="control-group"><label>Layer 1:</label><input type="file" id="file1" accept="image/*"/></div>
+    <div class="control-group"><label>Layer 2:</label><input type="file" id="file2" accept="image/*"/></div>
+    <div class="control-group"><label>Layer 3:</label><input type="file" id="file3" accept="image/*"/></div>
+    <div class="control-group"><label>Active Layer:</label>
+      <select id="layer-select">
+        <option value="0">1</option>
+        <option value="1">2</option>
+        <option value="2">3</option>
+      </select>
+    </div>
+    <button id="tool-paint" class="tool-btn">Paint</button>
+    <button id="tool-erase" class="tool-btn">Erase</button>
+    <button id="tool-move" class="tool-btn">Move</button>
+    <div class="control-group"><label>Size</label><input type="range" id="brush-size" min="5" max="200" step="1" value="30"/><canvas id="brush-preview" width="40" height="40"></canvas></div>
+    <div class="control-group"><label>Strength</label><input type="range" id="brush-strength" min="0" max="1" step="0.01" value="1"/></div>
+    <div class="control-group"><label>Softness</label><input type="range" id="brush-softness" min="0" max="1" step="0.01" value="0.5"/></div>
+    <div class="control-group"><label>Scale</label><input type="range" id="transform-scale" min="0.1" max="3" step="0.001" value="1"/></div>
+    <div class="control-group"><label>Rotate</label><input type="range" id="transform-rotation" min="-180" max="180" step="0.1" value="0"/><span id="rotation-value">0°</span></div>
+    <div class="control-group"><label>Opacity</label><input type="range" id="opacity" min="0" max="1" step="0.01" value="1"/></div>
+    <button id="swap-btn" class="tool-btn">Swap</button>
+    <button id="mirror-btn" class="tool-btn">Mirror</button>
+    <button id="quick-save" class="tool-btn">Quick Save</button>
+    <button id="save-as" class="tool-btn">Save As</button>
+    <button id="undo-btn" class="tool-btn">Undo</button>
+    <button id="redo-btn" class="tool-btn">Redo</button>
+  </div>
+  <div id="canvas-container">
+    <canvas id="layer1" class="layer"></canvas>
+    <canvas id="layer2" class="layer"></canvas>
+    <canvas id="layer3" class="layer"></canvas>
+  </div>
+  <script>
+    const brush = { size:30, strength:1, softness:0.5 };
+    let saveCount = 0;
+    const layers = [];
+    const container = document.getElementById('canvas-container');
+    const toolbarHeight = document.getElementById('toolbar').offsetHeight;
+    let activeLayer, currentTool = 'move', isDrawing = false, lastPos = { x:0, y:0 };
+
+    // Initialize three layers with single mask
+    for(let i=1;i<=3;i++){
+      const canvas = document.getElementById('layer'+i);
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight - toolbarHeight;
+      canvas.style.zIndex = i-1;
+      const ctx = canvas.getContext('2d');
+      const mask = document.createElement('canvas');
+      const maskCtx = mask.getContext('2d');
+      layers.push({ canvas, ctx, image:null, mask, maskCtx,
+        transform:{ x:canvas.width/2, y:canvas.height/2, scale:1, rotation:0, flipX:1 },
+        opacity:1, undoStack:[], redoStack:[] });
+    }
+    activeLayer = layers[0];
+
+    // Tool selection
+    function setActiveTool(tool){
+      currentTool = tool;
+      document.querySelectorAll('.tool-btn').forEach(b=> b.classList.toggle('active', b.id==='tool-'+tool));
+    }
+    document.getElementById('tool-paint').addEventListener('click', ()=>setActiveTool('paint'));
+    document.getElementById('tool-erase').addEventListener('click', ()=>setActiveTool('erase'));
+    document.getElementById('tool-move').addEventListener('click', ()=>setActiveTool('move'));
+
+    // Helpers
+    function swapLayers(){ layers.forEach(l=> l.canvas.style.zIndex = l.canvas.style.zIndex==='0'?'2':'0'); }
+    function mirrorLayer(){ activeLayer.transform.flipX *= -1; drawAll(); }
+    function updateOpacity(v){ activeLayer.opacity = v; drawAll(); }
+    function getExportCanvas(){
+      const ec = document.createElement('canvas');
+      ec.width = layers[0].canvas.width;
+      ec.height = layers[0].canvas.height;
+      const ectx = ec.getContext('2d');
+      layers.sort((a,b)=>parseInt(a.canvas.style.zIndex)-parseInt(b.canvas.style.zIndex))
+            .forEach(l=> ectx.drawImage(l.canvas,0,0));
+      return ec;
+    }
+    function quickSave(){
+      const ec = getExportCanvas();
+      ec.toBlob(blob=>{
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'export.jpg';
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 'image/jpeg');
+    }
+    async function saveAs(){
+      const ec = getExportCanvas();
+      if(window.showSaveFilePicker){
+        saveCount++;
+        const fn = saveCount===1 ? 'export.jpg' : `export-${saveCount}.jpg`;
+        const handle = await showSaveFilePicker({ suggestedName:fn, types:[{description:'JPEG Image',accept:{'image/jpeg':['.jpg']}}] });
+        const writable = await handle.createWritable();
+        const blob = await new Promise(r=> ec.toBlob(r,'image/jpeg'));
+        await writable.write(blob);
+        await writable.close();
+      } else quickSave();
+    }
+    function undo(){
+      const l = activeLayer;
+      if(!l.undoStack.length) return;
+      const data = l.undoStack.pop();
+      l.redoStack.push(l.maskCtx.getImageData(0,0,l.mask.width,l.mask.height));
+      l.maskCtx.putImageData(data, 0,0);
+      drawAll();
+    }
+    function redo(){
+      const l = activeLayer;
+      if(!l.redoStack.length) return;
+      const data = l.redoStack.pop();
+      l.undoStack.push(l.maskCtx.getImageData(0,0,l.mask.width,l.mask.height));
+      l.maskCtx.putImageData(data, 0,0);
+      drawAll();
+    }
+
+    // Brush preview
+    const preview = document.getElementById('brush-preview');
+    const pctx = preview.getContext('2d');
+    function updateBrushPreview(){
+      const w = preview.width, h = preview.height;
+      const r = brush.size/200 * (w/2);
+      pctx.clearRect(0,0,w,h);
+      pctx.beginPath(); pctx.arc(w/2,h/2,r,0,2*Math.PI); pctx.stroke();
+    }
+
+    // Load image into layer and init mask
+    function loadLayer(e, idx){
+      const file = e.target.files[0]; if(!file) return;
+      const img = new Image();
+      img.onload = ()=>{
+        const l = layers[idx];
+        l.image = img;
+        // size mask to image
+        l.mask.width = img.width;
+        l.mask.height = img.height;
+        l.maskCtx.canvas.width = img.width;
+        l.maskCtx.canvas.height = img.height;
+        // init mask opaque
+        l.maskCtx.fillStyle = 'white';
+        l.maskCtx.fillRect(0,0,img.width,img.height);
+        l.transform = { x: l.canvas.width/2, y: l.canvas.height/2, scale:1, rotation:0, flipX:1 };
+        drawAll();
+      };
+      img.src = URL.createObjectURL(file);
+    }
+
+    // Draw each layer single-pass
+    function drawAll(){
+      layers.forEach(l => {
+        const {ctx, image, mask, transform, opacity} = l;
+        ctx.clearRect(0,0,l.canvas.width,l.canvas.height);
+        if(!image) return;
+        const {x,y,scale,rotation,flipX} = transform;
+        const dx = -image.width/2, dy = -image.height/2;
+        ctx.save();
+        ctx.translate(x,y);
+        ctx.rotate(rotation);
+        ctx.scale(flipX*scale,scale);
+        ctx.globalAlpha = opacity;
+        ctx.drawImage(image, dx, dy);
+        // clip by mask
+        ctx.globalCompositeOperation = 'destination-in';
+        ctx.drawImage(mask, dx, dy);
+        ctx.restore();
+      });
+    }
+
+    // Interaction & mask editing
+    function onPointerDown(e){
+      const rect = container.getBoundingClientRect();
+      lastPos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      if(currentTool !== 'move'){
+        activeLayer.undoStack.push(
+          activeLayer.maskCtx.getImageData(0,0,activeLayer.mask.width,activeLayer.mask.height)
+        );
+        activeLayer.redoStack = [];
+        isDrawing = true;
+        applyBrush(lastPos);
+      } else {
+        isDrawing = true;
+      }
+    }
+    function onPointerMove(e){
+      if(!isDrawing) return;
+      const rect = container.getBoundingClientRect();
+      const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      if(currentTool !== 'move') applyBrush(pos);
+      else {
+        activeLayer.transform.x += pos.x - lastPos.x;
+        activeLayer.transform.y += pos.y - lastPos.y;
+      }
+      lastPos = pos;
+      drawAll();
+    }
+    function onPointerUp(){ isDrawing = false; }
+
+    function applyBrush(pos){
+      const l = activeLayer;
+      const ctxMask = l.maskCtx;
+      const { x,y,scale,rotation } = l.transform;
+      const dx = pos.x - x, dy = pos.y - y;
+      const cos = Math.cos(rotation), sin = Math.sin(rotation);
+      const ux = (dx * cos + dy * sin) / scale;
+      const uy = (-dx * sin + dy * cos) / scale;
+      const cx = ux + l.mask.width/2;
+      const cy = uy + l.mask.height/2;
+      const r = brush.size/2;
+      ctxMask.save();
+      ctxMask.globalAlpha = brush.strength;
+      if(currentTool === 'erase'){
+        ctxMask.globalCompositeOperation = 'destination-out'; // erase
+      } else {
+        ctxMask.globalCompositeOperation = 'source-over'; // paint restore
+      }
+      const grad = ctxMask.createRadialGradient(cx, cy, 0, cx, cy, r);
+      // Softness inverted: higher slider -> softer edge (inner full-opacity zone smaller)
+      grad.addColorStop(0, 'rgba(255,255,255,1)');
+      grad.addColorStop(1 - brush.softness, 'rgba(255,255,255,1)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctxMask.fillStyle = grad;
+      ctxMask.beginPath();
+      ctxMask.arc(cx, cy, r, 0, Math.PI*2);
+      ctxMask.fill();
+      ctxMask.restore();
+    }
+
+    // Event bindings
+    ['file1','file2','file3'].forEach((id,i)=>
+      document.getElementById(id).addEventListener('change', e=> loadLayer(e,i))
+    );
+    document.getElementById('layer-select').addEventListener('change', e=> activeLayer = layers[+e.target.value]);
+    document.getElementById('brush-size').addEventListener('input', e=>{ brush.size = +e.target.value; updateBrushPreview(); });
+    document.getElementById('brush-strength').addEventListener('input', e=> brush.strength = +e.target.value);
+    document.getElementById('brush-softness').addEventListener('input', e=> brush.softness = +e.target.value);
+    document.getElementById('transform-scale').addEventListener('input', e=>{ activeLayer.transform.scale = +e.target.value; drawAll(); });
+    document.getElementById('transform-rotation').addEventListener('input', e=>{ const deg = +e.target.value; activeLayer.transform.rotation = deg * Math.PI/180; document.getElementById('rotation-value').textContent = `${deg.toFixed(1)}°`; drawAll(); });
+    document.getElementById('opacity').addEventListener('input', e=> updateOpacity(+e.target.value));
+    document.getElementById('swap-btn').addEventListener('click', swapLayers);
+    document.getElementById('mirror-btn').addEventListener('click', mirrorLayer);
+    document.getElementById('quick-save').addEventListener('click', quickSave);
+    document.getElementById('save-as').addEventListener('click', saveAs);
+    document.getElementById('undo-btn').addEventListener('click', undo);
+    document.getElementById('redo-btn').addEventListener('click', redo);
+    container.addEventListener('pointerdown', onPointerDown);
+    container.addEventListener('pointermove', onPointerMove);
+    container.addEventListener('pointerup', onPointerUp);
+
+    // Initialize
+    updateBrushPreview();
+    drawAll();
+  </script>
+</body>
+</html>
