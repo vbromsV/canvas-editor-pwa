@@ -1,6 +1,6 @@
 const cacheName = 'canvas-editor-v1';
 const filesToCache = [
-  './index.html', './styles.css', './script.js', './manifest.json'
+  './index.html', './styles.css', './script.js', './manifest.json', './192.png', './512.png'
 ];
 self.addEventListener('install', event => {
   event.waitUntil(
