@@ -1,15 +1,14 @@
 const cacheName = 'canvas-editor-v1';
-const assetsToCache = [
-  '/', '/index.html', '/styles.css', '/script.js',
-  '/icons/192.png', '/icons/512.png', '/manifest.json'
+const filesToCache = [
+  './index.html', './styles.css', './script.js', './manifest.json'
 ];
-self.addEventListener('install', e => {
-  e.waitUntil(
-    caches.open(cacheName).then(cache => cache.addAll(assetsToCache))
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(cacheName).then(cache => cache.addAll(filesToCache))
   );
 });
-self.addEventListener('fetch', e => {
-  e.respondWith(
-    caches.match(e.request).then(resp => resp || fetch(e.request))
+self.addEventListener('fetch', event => {
+  event.respondWith(
+    caches.match(event.request).then(response => response || fetch(event.request))
   );
 });
